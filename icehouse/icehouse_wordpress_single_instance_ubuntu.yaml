@@ -1,0 +1,191 @@
+heat_template_version: 2013-05-23
+
+description: >
+  HOT template to deploy two servers into an existing neutron tenant network and
+  assign floating IP addresses to each server so they are routable from the
+  public network.
+
+parameters:
+  key_name:
+    type: string
+    description: Name of a KeyPair to enable SSH access to the instance.
+    default: mykey102
+  image:
+    type: string
+    description: Name of image to use for servers. In our case it is Ubuntu
+    default: Ubuntu_12_04_x86_64
+    constraints:
+      - allowed_values: [ Ubuntu_12_04_x86_32, Ubuntu_12_04_x86_64 ]
+        description: >
+          Image ID must be either Ubuntu_12_04_x86_32 or Ubuntu_12_04_x86_64.
+          In my deployment precise-server-cloudimg-amd64-disk1.img is Ubuntu_12_04_x86_64
+          and precise-server-cloudimg-i386-disk1.img is Ubuntu_12_04_x86_32. Change allowed_values 
+          according to your environment image name.
+  flavor:
+    type: string
+    description: Flavor to use for servers
+    default: m1.small
+    constraints:
+      - allowed_values: [m1.small, m1.medium, m1.large]
+        description: flavor must be one of m1.small, m1.medium or m1.large
+  public_net_id:
+    type: string
+    description: >
+      ID of public network for which floating IP addresses will be allocated
+    default: d349fdaa-d49d-486c-9807-4d07fc4d1cd8
+  private_net_id:
+    type: string
+    description: ID of private network into which servers get deployed
+    default: 25a7a783-90fc-4ad2-a719-f6b9fd9d96e9
+  private_subnet_id:
+    type: string
+    description: ID of private sub network into which servers get deployed
+    default: 67c9e4a0-d717-4eaa-83a6-6e6189c2a0c2
+  db_name:
+    type: string
+    description: WordPress database name
+    default: wordpress
+    constraints:
+      - length: { min: 1, max: 64 }
+        description: db_name must be between 1 and 64 characters
+      - allowed_pattern: '[a-zA-Z][a-zA-Z0-9]*'
+        description: >
+          db_name must begin with a letter and contain only alphanumeric
+          characters
+  db_username:
+    type: string
+    description: The WordPress database admin account username
+    default: admin
+    hidden: true
+    constraints:
+      - length: { min: 1, max: 16 }
+        description: db_username must be between 1 and 64 characters
+      - allowed_pattern: '[a-zA-Z][a-zA-Z0-9]*'
+        description: >
+          db_username must begin with a letter and contain only alphanumeric
+          characters
+  db_password:
+    type: string
+    description: The WordPress database admin account password
+    default: admin
+    hidden: true
+    constraints:
+      - length: { min: 1, max: 41 }
+        description: db_username must be between 1 and 64 characters
+      - allowed_pattern: '[a-zA-Z0-9]*'
+        description: db_password must contain only alphanumeric characters
+  db_root_password:
+    type: string
+    description: Root password for MySQL
+    default: admin
+    hidden: true
+    constraints:
+      - length: { min: 1, max: 41 }
+        description: db_username must be between 1 and 64 characters
+      - allowed_pattern: '[a-zA-Z0-9]*'
+        description: db_password must contain only alphanumeric characters
+
+resources:
+  server1:
+    type: OS::Nova::Server
+    properties:
+      name: Server1
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: server1_port }
+      user_data_format: RAW
+      config_drive: "true"
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            export DEBIAN_FRONTEND=noninteractive
+            sudo apt-get -y update 
+            sudo apt-get -y install apache2
+            sudo apt-get -y update
+            sudo apt-get -y install apache2
+            sudo apt-get -y install wordpress
+            sudo debconf-set-selections <<< "mysql-server mysql-server/root_password password db_rootpassword"
+            sudo debconf-set-selections <<< "mysql-server mysql-server/root_password_again password db_rootpassword"
+            sudo apt-get -y install mysql-server
+            #sudo mysqladmin -u root password db_rootpassword
+            cat << EOF | mysql -u root --password=db_rootpassword
+            CREATE DATABASE db_name;
+            GRANT ALL PRIVILEGES ON db_name.* TO "db_user"@"localhost" IDENTIFIED BY "db_password";
+            FLUSH PRIVILEGES;
+            EXIT
+            EOF
+            sudo ln -s /usr/share/wordpress /var/www/wordpress
+            sudo cat << EOF > /etc/apache2/sites-available/wordpress
+            Alias /blog /usr/share/wordpress
+            Alias /blog/wp-content /var/lib/wordpress/wp-content
+            <Directory /usr/share/wordpress>
+            Options FollowSymLinks
+            AllowOverride Limit Options FileInfo
+            DirectoryIndex index.php
+            Order allow,deny
+            Allow from all
+            </Directory>
+            <Directory /var/lib/wordpress/wp-content>
+            Options FollowSymLinks
+            Order allow,deny
+            Allow from all
+            </Directory>
+            EOF
+            sudo cat << EOF > /etc/wordpress/config-default.php
+            <?php
+            define('DB_USER','admin');
+            define('DB_PASSWORD','admin');
+            define('DB_HOST', 'localhost');
+            define('WP_CONTENT_DIR', '/var/lib/wordpress/wp-content');
+            ?>
+            EOF
+            sudo service apache2 restart
+
+      
+          params:
+            db_rootpassword: { get_param: db_root_password }
+            db_name: { get_param: db_name }
+            db_user: { get_param: db_username }
+            db_password: { get_param: db_password }
+
+  server1_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: private_net_id }
+      fixed_ips:
+        - subnet_id: { get_param: private_subnet_id }
+      security_groups: [{ get_resource: server_security_group }]
+
+  server1_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_net_id }
+      port_id: { get_resource: server1_port }
+  
+  server_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: security-group1
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+outputs:
+  WebsiteURL:
+    description: URL for Apache2
+    value:
+      str_replace:
+        template: http://host
+        params:
+          host: { get_attr: [server1, first_address] }
