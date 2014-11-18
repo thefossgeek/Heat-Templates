@@ -1,4 +1,4 @@
 Heat-Templates
 ==============
 
-Openstack Heat Orchestration Template(HOT) Samples. Tested
+Openstack Heat Orchestration Template(HOT) Samples.
